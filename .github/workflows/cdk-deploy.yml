@@ -1,0 +1,104 @@
+name: CDK Deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'lib/**'
+      - 'bin/**'
+      - 'cdk.json'
+      - '.github/workflows/cdk-deploy.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - prd
+
+jobs:
+  deploy-infra:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-northeast-1
+      
+      - name: CDK Synth
+        run: npx cdk synth
+      
+      - name: CDK Deploy - Infrastructure Layer
+        run: |
+          npx cdk deploy InfraStorageStack --require-approval never
+          npx cdk deploy InfraDatabaseStack --require-approval never
+          npx cdk deploy InfraAuthStack --require-approval never
+      
+      - name: CDK Deploy - Application Layer
+        run: |
+          npx cdk deploy AppAdminStack --require-approval never
+          npx cdk deploy AppViewerStack --require-approval never
+  
+  deploy-frontend:
+    runs-on: ubuntu-latest
+    needs: deploy-infra
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-northeast-1
+      
+      - name: Build Admin Frontend
+        working-directory: frontend-admin
+        run: |
+          npm ci
+          npm run build
+      
+      - name: Deploy Admin Frontend to S3
+        working-directory: frontend-admin
+        run: |
+          aws s3 sync dist/ s3://${{ secrets.ADMIN_BUCKET_NAME }} --delete
+          aws cloudfront create-invalidation --distribution-id ${{ secrets.ADMIN_DISTRIBUTION_ID }} --paths "/*"
+      
+      - name: Build Viewer Frontend
+        working-directory: frontend-viewer
+        run: |
+          npm ci
+          npm run build
+      
+      - name: Deploy Viewer Frontend to S3
+        working-directory: frontend-viewer
+        run: |
+          aws s3 sync dist/ s3://${{ secrets.VIEWER_BUCKET_NAME }} --delete
+          aws cloudfront create-invalidation --distribution-id ${{ secrets.VIEWER_DISTRIBUTION_ID }} --paths "/*"

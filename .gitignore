@@ -1,8 +1,43 @@
-*.js
-!jest.config.js
-*.d.ts
-node_modules
+# Dependencies
+node_modules/
 
-# CDK asset staging directory
+# CDK TypeScript build outputs (root level)
+bin/*.js
+bin/*.d.ts
+lib/*.js
+lib/*.d.ts
+test/*.js
+test/*.d.ts
+
+# CDK staging
 .cdk.staging
-cdk.out
+cdk.out/
+
+# Frontend build outputs
+frontend-admin/dist/
+frontend-viewer/dist/
+
+# Lambda build outputs
+lambda/dist/
+
+# E2E compiled outputs
+e2e/tests/*.js
+e2e/tests/*.d.ts
+e2e/*.d.ts
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+
+# Test artifacts
+coverage/
+test-results/
+playwright-report/
+
+# Temporary / generated files
+*.log
+test-upload-event.json
+SELF_SIGNUP_SUMMARY.md

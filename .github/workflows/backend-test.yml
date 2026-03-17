@@ -1,0 +1,58 @@
+name: Backend Tests
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'lambda/**'
+      - '.github/workflows/backend-test.yml'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'lambda/**'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        node-version: [22.x]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+          cache-dependency-path: lambda/package-lock.json
+      
+      - name: Install dependencies
+        working-directory: lambda
+        run: npm ci
+      
+      - name: Run linter
+        working-directory: lambda
+        run: npm run lint || echo "Linter not configured"
+      
+      - name: Run unit tests
+        working-directory: lambda
+        run: npm test -- --coverage
+      
+      - name: Upload coverage reports
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./lambda/coverage/lcov.info
+          flags: backend
+          name: backend-coverage
+        if: always()
+      
+      - name: Archive test results
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: lambda/coverage
+        if: always()

@@ -11,7 +11,7 @@ AWS上で動作するサーバーレス画像管理システムの設計書で�
 - 画像ダウンロード機能（単一・一括）
 - 無限スクロール対応の公開ギャラリー
 - 画像拡大表示・スライドショー機能
-- 管理画面でのページネーション・一括削除
+- 管理画面でのページネーション・一括操作（削除・ダウンロード・公開/非公開）
 
 ## アーキテクチャ
 
@@ -87,10 +87,12 @@ graph TB
 // 主要コンポーネント
 interface AdminScreenComponents {
   LoginForm: React.FC;           // ログイン画面
+  SignUpForm: React.FC;          // サインアップ画面（Regular_User用、name入力フィールド付き）
   ImageUpload: React.FC;         // 画像アップロード
   ImageList: React.FC;           // 画像一覧（ページネーション）
   ImageEditor: React.FC;         // 画像編集（タグ付け）
-  BulkActions: React.FC;         // 一括操作
+  BulkActions: React.FC;         // 一括操作（削除・ダウンロード・公開/非公開）
+  LogoutButton: React.FC;        // ログアウトボタン
 }
 
 // 画像アップロード機能
@@ -120,6 +122,52 @@ interface InfiniteScrollProps {
   pageSize: number;
 }
 ```
+
+#### 2.1 URLパラメータによるタグ絞り込み（Viewer Screen）
+ビューアー画面のURLにクエリパラメータ`tag`を指定することで、特定のタグで絞り込んだ状態でギャラリーを表示できる。
+
+##### URL形式
+```
+https://{viewer-domain}/?tag={tagName}
+```
+
+##### 仕様
+- URLパラメータ`tag`が指定されている場合、ページ読み込み時に自動的にそのタグでフィルタリングされた状態で表示
+- SearchFilterコンポーネントのタグフィルターにも反映（UIと同期）
+- タグが存在しない場合は結果0件として表示（エラーにはしない）
+- ユーザーがUI上でフィルターを変更した場合、URLパラメータも連動して更新（ブラウザの履歴に残る）
+- 複数タグの指定: `?tag=風景&tag=夏` のように複数指定可能（AND条件）
+
+##### 実装方針
+- `useSearchParams`（React Router）を使用してURLパラメータを読み書き
+- ページ初期化時にURLパラメータからタグを取得し、APIリクエストの`tags`パラメータに渡す
+- フィルター変更時に`setSearchParams`でURLを更新（`pushState`でブラウザ履歴に追加）
+
+```typescript
+// GalleryPage.tsx での使用例
+const [searchParams, setSearchParams] = useSearchParams();
+const initialTags = searchParams.getAll('tag');
+
+// 初期表示時にタグフィルターを適用
+useEffect(() => {
+  if (initialTags.length > 0) {
+    setSelectedTags(initialTags);
+    loadImages({ tags: initialTags });
+  }
+}, []);
+
+// フィルター変更時にURLも更新
+const handleTagChange = (tags: string[]) => {
+  setSelectedTags(tags);
+  const params = new URLSearchParams();
+  tags.forEach(tag => params.append('tag', tag));
+  setSearchParams(params);
+};
+```
+
+##### ユースケース
+- 管理者が特定タグの画像を共有したい場合にURLを配布
+- SNSやメールでタグ付きギャラリーリンクを共有
 
 ### バックエンド API
 
@@ -171,16 +219,22 @@ interface ImageAPI {
     response: Blob;
   };
   
-  // 一括ダウンロード
+  // 一括ダウンロード（S3署名付きURL方式）
   'POST /api/images/download/bulk': {
     body: { imageIds: string[] };
-    response: Blob; // ZIP file
+    response: { downloadUrl: string }; // S3署名付きURL
   };
   
   // 公開状態変更
   'PATCH /api/images/:id/visibility': {
     body: { isPublic: boolean };
     response: UpdateResponse;
+  };
+  
+  // 一括公開状態変更
+  'PATCH /api/images/visibility/bulk': {
+    body: { imageIds: string[]; isPublic: boolean };
+    response: BulkUpdateResponse;
   };
 }
 ```
@@ -199,6 +253,26 @@ interface AuthAPI {
     headers: { Authorization: string };
     response: UserInfo;
   };
+  
+  // reCAPTCHA検証（サインアップ時）
+  'POST /api/admin/auth/verify-recaptcha': {
+    body: {
+      token: string;
+      action: string;
+    };
+    response: {
+      success: boolean;
+      score: number;
+      action: string;
+      details?: {
+        hostname: string;
+        challenge_ts: string;
+      };
+    };
+  };
+  
+  // セルフサインアップ（Cognitoが処理）
+  // フロントエンドからAWS Amplifyを使用して直接Cognitoにリクエスト
 }
 ```
 
@@ -545,6 +619,397 @@ interface PublicPagination {
 *すべての*スライドショー状態について、現在の画像位置が正しく表示される
 **検証: 要件 8.8**
 
+## 実装の詳細
+
+### 1. API Gateway設定
+
+#### CORS設定
+- **プリフライトリクエスト**: すべてのエンドポイントでOPTIONSメソッドを有効化
+- **レスポンスヘッダー**: 
+  - `Access-Control-Allow-Origin: *`
+  - `Access-Control-Allow-Headers: Content-Type,Authorization`
+  - `Access-Control-Allow-Methods: GET,POST,PUT,DELETE,PATCH,OPTIONS`
+
+#### Gateway Responses
+認証エラー時にLambda関数を呼ぶ前にAPI Gatewayがエラーを返すため、CORSヘッダーを含むGateway Responsesを設定:
+- **UNAUTHORIZED (401)**: 認証トークンが無効または期限切れ
+- **ACCESS_DENIED (403)**: 権限不足
+- **DEFAULT_4XX**: その他の4xxエラー
+- **DEFAULT_5XX**: サーバーエラー
+
+#### バイナリメディアタイプ
+一括ダウンロード（ZIP）等のバイナリレスポンスに対応するため、API Gatewayにバイナリメディアタイプを設定:
+- `application/zip`
+- `application/octet-stream`
+
+#### ペイロード制限
+- **最大サイズ**: 10MB（API Gatewayの制限）
+- **対応策**: フロントエンドでファイルを6MB以下のバッチに分割して順次アップロード
+  - base64エンコード後のサイズを考慮（約33%増加）
+  - バッチごとに進捗表示
+
+### 2. 一括ダウンロード機能（S3署名付きURL方式）
+
+#### 概要
+一括ダウンロードはLambda関数内でZIPファイルを生成し、S3に一時保存した後、署名付きURLをフロントエンドに返す方式を採用。フロントエンドは署名付きURLを使って直接S3からZIPをダウンロードする。
+
+#### 大量画像対応（最大200枚）
+- **最大ダウンロード件数**: 200枚
+- **Lambda設定**: タイムアウト300秒、メモリ2048MB
+- **メモリ内ZIP生成**: AdmZip ライブラリを使用し、S3から画像をBufferとして取得してZIPに追加
+  - `s3Response.Body.transformToByteArray()`でAWS SDK v3のBodyをByteArrayに変換
+  - `Buffer.from(bodyBytes)`でBufferに変換してAdmZipに追加
+  - `zip.toBuffer()`でZIPバッファを生成
+- **S3アップロード**: `PutObjectCommand`でZIPバッファをS3に直接アップロード
+- **一時ファイル保存先**: `tmp/downloads/{userId}/{timestamp}.zip`
+- **署名付きURL生成**: `ResponseContentDisposition: attachment`と`ResponseContentType: application/zip`を指定し、ブラウザが自動的にZIPファイルとしてダウンロードするようにする
+- **署名付きURL有効期限**: 10分（600秒）
+- **一時ファイルのクリーンアップ**: S3ライフサイクルルールで`tmp/`プレフィックスのオブジェクトを1日後に自動削除
+
+#### フロントエンド実装
+- APIから署名付きURLを取得後、`window.open(downloadUrl, '_blank')`でダウンロードをトリガー
+- 署名付きURLに`ResponseContentDisposition: attachment`が含まれているため、ブラウザが自動的にファイルダウンロードを開始
+- `fetch`+Blob方式は使用しない（CORSの問題やファイルサイズ制限を回避）
+
+#### 分割ダウンロード（フロントエンド制御）
+50枚を超える画像を選択した場合、フロントエンド側で自動的にバッチ分割してダウンロードする:
+- **バッチサイズ**: 50枚ずつ
+- **進捗表示**: 「ZIP生成中... (1/4)」のようにバッチ進捗を表示
+- **順次実行**: 各バッチを順次APIに送信し、ZIPダウンロードを実行
+- **バッチ間隔**: 2秒の待機時間を設けてブラウザのダウンロード開始を待つ
+
+#### 大量操作時のユーザーアナウンス
+- **アップロード**: 10枚以上のファイルを選択した場合、処理開始時に「{N}件のファイルを処理します。しばらくお待ちください...」と表示
+- **ダウンロード**: 20枚以上の画像を選択した場合、確認ダイアログで「枚数が多いため時間がかかる場合があります。続行しますか？」と表示
+
+```typescript
+const BATCH_SIZE = 50;
+const batches = chunkArray(imageIds, BATCH_SIZE);
+for (let i = 0; i < batches.length; i++) {
+  setDownloadProgress(`ZIP生成中... (${i + 1}/${batches.length})`);
+  const downloadUrl = await bulkDownloadImages(batches[i]);
+  window.open(downloadUrl, '_blank');
+  await sleep(2000);
+}
+```
+
+#### エラーハンドリング
+- 個別画像の取得失敗時はスキップして続行
+- 全画像取得失敗時は400エラーを返す
+- Lambda タイムアウト対策として、処理時間を監視し残り時間が少ない場合は途中結果を返す（60秒の余裕を持つ）
+
+### 2. Lambda関数実装
+
+#### 依存パッケージ
+- **uuid**: v9を使用（CommonJS対応）
+  - v13はES Moduleのため、CommonJSにコンパイルされたLambda関数で読み込めない
+  - v9はCommonJS形式で提供されているため互換性あり
+
+#### 認証・認可処理
+- **Cognitoグループ取得**: `cognito:groups`が文字列または配列で来る可能性に対応
+  ```typescript
+  const cognitoGroups = event.requestContext.authorizer?.claims?.['cognito:groups'];
+  let groups: string[] = [];
+  
+  if (typeof cognitoGroups === 'string') {
+    try {
+      if (cognitoGroups.startsWith('[')) {
+        groups = JSON.parse(cognitoGroups);
+      } else {
+        // 単一の文字列の場合（例: "System_Admin"）
+        groups = [cognitoGroups];
+      }
+    } catch (error) {
+      groups = [cognitoGroups];
+    }
+  } else if (Array.isArray(cognitoGroups)) {
+    groups = cognitoGroups;
+  }
+  ```
+- **権限チェック**: グループ名の配列に`System_Admin`または`Image_Manager`が含まれているかチェック
+
+#### APIレスポンス形式
+すべてのLambda関数は統一されたレスポンス形式を返す:
+```typescript
+// 成功レスポンス
+{
+  statusCode: 200,
+  headers: {
+    'Content-Type': 'application/json',
+    'Access-Control-Allow-Origin': '*'
+  },
+  body: JSON.stringify({
+    success: true,
+    data: {
+      // レスポンスデータ
+    }
+  })
+}
+
+// エラーレスポンス
+{
+  statusCode: 400,
+  headers: {
+    'Content-Type': 'application/json',
+    'Access-Control-Allow-Origin': '*'
+  },
+  body: JSON.stringify({
+    success: false,
+    error: {
+      message: 'エラーメッセージ',
+      details: {}
+    }
+  })
+}
+```
+
+### 3. フロントエンド実装
+
+#### 認証機能
+- **ログイン**: AWS Amplifyを使用したCognito認証
+- **ログアウト**: `signOut()`を呼び出してセッションを終了し、ログイン画面にリダイレクト
+  ```typescript
+  const handleLogout = async () => {
+    try {
+      await logout();
+      navigate('/login');
+    } catch (error) {
+      console.error('ログアウトに失敗しました:', error);
+      alert('ログアウトに失敗しました');
+    }
+  };
+  ```
+- **セルフサインアップ**: Regular_User用のサインアップページ（reCAPTCHA v3統合）
+- **自動ログイン**: サインアップ後の確認コード入力完了時に自動ログイン
+
+#### React Strict Mode対応
+- **問題**: React 18のStrictモードでuseEffectが2回実行され、同じ画像が2回追加される
+- **解決**: `setImages`内で重複チェックを追加（imageIdでユニーク化）
+  ```typescript
+  setImages(prev => {
+    const existingIds = new Set(prev.map(img => img.imageId));
+    const newImages = response.data.images.filter(
+      img => !existingIds.has(img.imageId)
+    );
+    return [...prev, ...newImages];
+  });
+  ```
+
+#### APIクライアント
+- **レスポンス構造**: `response.data.data`でデータを取得
+  ```typescript
+  const response = await api.get('/api/images/public');
+  const images = response.data.data.images;
+  ```
+
+#### バッチアップロード
+- **バッチサイズ**: 6MB以下（base64エンコード後のサイズを考慮）
+- **進捗表示**: バッチ数とファイル数を表示
+  ```typescript
+  const BATCH_SIZE_LIMIT = 6 * 1024 * 1024; // 6MB
+  const batches = createBatches(files, BATCH_SIZE_LIMIT);
+  
+  for (let i = 0; i < batches.length; i++) {
+    setUploadProgress(`バッチ ${i + 1}/${batches.length} をアップロード中...`);
+    await uploadBatch(batches[i]);
+  }
+  ```
+
+#### レスポンシブグリッドレイアウト
+画面幅いっぱいに画像を表示し、画面サイズに応じて自動的に列数を調整:
+- **画面幅400px以上**: 2列
+- **画面幅600px以上**: 3列
+- **画面幅800px以上**: 4列
+- **画面幅1000px以上**: 5列以上
+
+```css
+/* 管理画面のグリッドレイアウト */
+.image-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 1.5rem;
+  margin-bottom: 2rem;
+}
+
+/* ビューワー画面のグリッドレイアウト */
+.gallery-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 20px;
+}
+
+/* 親要素の幅制限を解除 */
+.page-content {
+  max-width: 100%;  /* 1400pxから変更 */
+  margin: 0 auto;
+  padding: 2rem;
+}
+
+/* bodyのflexレイアウトを削除（Viteのデフォルトテンプレートから） */
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  /* display: flex; と place-items: center; を削除 */
+}
+```
+
+**重要な修正点**:
+1. `grid-template-columns: repeat(auto-fill, minmax(200px, 1fr))` でシンプルに設定
+2. `.page-content` の `max-width` を `1400px` から `100%` に変更
+3. `body` の `display: flex` と `place-items: center` を削除（Viteのデフォルトテンプレートに含まれていた設定）
+
+### 4. サムネイル生成機能
+
+#### Lambda関数配置
+- **配置先**: `InfraStorageStack`（ストレージレイヤー）
+  - 理由: S3イベント通知を設定するため、S3バケットと同じStackに配置
+  - 以前は`AppAdminStack`に配置していたが、循環参照を避けるために移動
+
+#### S3イベント通知設定
+画像がアップロードされると自動的にサムネイル生成Lambda関数が実行される:
+```typescript
+// .jpgファイルのアップロード時
+imagesBucket.addEventNotification(
+  s3.EventType.OBJECT_CREATED,
+  new s3n.LambdaDestination(imageResizeFunction),
+  {
+    prefix: 'images/',
+    suffix: '.jpg',
+  }
+);
+
+// .jpegファイルのアップロード時
+imagesBucket.addEventNotification(
+  s3.EventType.OBJECT_CREATED,
+  new s3n.LambdaDestination(imageResizeFunction),
+  {
+    prefix: 'images/',
+    suffix: '.jpeg',
+  }
+);
+```
+
+#### sharpモジュールのクロスプラットフォーム対応
+Lambda関数はLinux環境で実行されるため、macOSやWindowsでビルドする場合はLinux用のsharpバイナリをインストールする必要がある:
+
+```json
+// lambda/package.json
+{
+  "scripts": {
+    "build": "tsc && cp package.json package-lock.json dist/ && cd dist && npm install --omit=dev && npm install --os=linux --cpu=x64 sharp"
+  }
+}
+```
+
+**重要なポイント**:
+1. `npm install --omit=dev` で本番用の依存パッケージをインストール
+2. `npm install --os=linux --cpu=x64 sharp` でLinux用のsharpバイナリを追加インストール
+3. この順序が重要（先にすべての依存パッケージをインストールしてから、sharpを上書き）
+
+#### サムネイルサイズ
+```typescript
+const thumbnailSizes = {
+  small: { width: 150, height: 150 },
+  medium: { width: 400, height: 400 },
+  large: { width: 800, height: 600 }
+};
+```
+
+#### Lambda関数設定
+```typescript
+const imageResizeFunction = new lambda.Function(this, 'ImageResizeFunction', {
+  runtime: lambda.Runtime.NODEJS_24_X,
+  handler: 'handlers/image-resize.handler',
+  code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/dist')),
+  functionName: `ImageManagement-ImageResize-${environment}`,
+  timeout: cdk.Duration.seconds(60),
+  memorySize: 1024,  // 画像処理のため多めに設定
+  environment: {
+    THUMBNAILS_BUCKET: props.thumbnailsBucketName,
+    IMAGES_TABLE: props.imagesTableName,
+    LOG_LEVEL: environment === 'prd' ? 'INFO' : 'DEBUG',
+  },
+});
+```
+
+### 5. Cognito設定
+
+#### ユーザープール設定
+- **セルフサインアップ**: 有効（Regular_Userのみ自分でアカウント作成可能）
+- **標準属性**:
+  - `email`: 必須、変更可能
+  - `name` (fullname): オプション、変更可能（ユーザー表示名として使用）
+- **パスワードポリシー**: 
+  - 最小長: 8文字
+  - 大文字、小文字、数字、記号を含む
+- **MFA**: オプション（推奨）
+- **メール検証**: 必須（確認コードをメールで送信）
+
+#### ユーザー名の取得優先順位
+画像のownerNameやユーザー表示名を取得する際の優先順位:
+1. `name` (Cognito標準属性) - サインアップ時に入力された名前
+2. `cognito:username` - Cognitoのユーザー名
+3. `email` - メールアドレス
+4. `Test User` - フォールバック値
+
+```typescript
+const userName = event.requestContext.authorizer?.claims?.name || 
+                 event.requestContext.authorizer?.claims?.['cognito:username'] || 
+                 event.requestContext.authorizer?.claims?.email || 
+                 'Test User';
+```
+
+#### App Client設定
+- **認証フロー**: USER_PASSWORD_AUTH
+- **トークン有効期限**: 
+  - アクセストークン: 1時間
+  - リフレッシュトークン: 30日
+- **属性設定**: 削除（デフォルトの属性のみ使用）
+
+#### Lambda Triggers
+- **Post Confirmation**: サインアップ後に自動的にRegular_Userグループに追加
+  - トリガー関数: `post-confirmation.ts`
+  - 処理内容: Cognitoグループ `Regular_User` にユーザーを追加
+
+#### ユーザーグループ
+- **System_Admin**: すべての操作が可能（管理者が手動で割り当て）
+- **Image_Manager**: 画像の閲覧・ダウンロード・公開状態変更が可能（管理者が手動で割り当て）
+- **Regular_User**: 自分の画像のみ操作可能（セルフサインアップ時に自動割り当て）
+
+#### セルフサインアップフロー
+```
+1. ユーザーが /signup にアクセス
+   ↓
+2. 名前、メールアドレス、パスワードを入力
+   ↓
+3. reCAPTCHA v3が自動的にトークンを生成
+   ↓
+4. バックエンドでreCAPTCHAトークンを検証（スコア >= 0.5）
+   ↓
+5. Cognitoにサインアップリクエスト（name属性を含む）
+   ↓
+6. 確認コードがメールで送信される
+   ↓
+7. ユーザーが確認コードを入力
+   ↓
+8. Post Confirmation Triggerが実行
+   ↓
+9. 自動的にRegular_Userグループに追加
+   ↓
+10. 自動ログイン
+   ↓
+11. 管理画面にリダイレクト
+```
+
+#### reCAPTCHA v3統合
+- **目的**: ボット対策、スパムアカウント作成防止
+- **バージョン**: reCAPTCHA v3（目に見えないチェック）
+- **スコア閾値**: 0.5（0.0〜1.0のスコアで判定）
+- **検証エンドポイント**: `POST /api/admin/auth/verify-recaptcha`
+- **Site Key**: 環境変数 `VITE_RECAPTCHA_SITE_KEY`
+- **Secret Key**: 環境変数 `RECAPTCHA_SECRET_KEY`（Lambda関数）
+
 ## エラーハンドリング
 
 ### 1. アップロードエラー
@@ -552,11 +1017,12 @@ interface PublicPagination {
 - **無効ファイル形式**: JPEG以外の形式は拒否し、エラーメッセージを表示
 - **ネットワークエラー**: アップロード中の接続エラーは再試行機能を提供
 - **ストレージエラー**: S3への保存失敗時は適切なエラーメッセージを表示
+- **API Gateway制限**: 10MBを超えるリクエストはバッチ分割して送信
 
 ### 2. 認証・認可エラー
 - **認証失敗**: 無効な認証情報はログイン画面にリダイレクト
 - **セッション期限切れ**: 期限切れセッションは再認証を要求
-- **権限不足**: 権限のない操作は403エラーで拒否
+- **権限不足**: 権限のない操作は403エラーで拒否（CORSヘッダー付き）
 - **不正アクセス**: 他ユーザーのデータアクセスは拒否
 
 ### 3. データ処理エラー
@@ -568,6 +1034,7 @@ interface PublicPagination {
 - **読み込みエラー**: 画像読み込み失敗時は代替画像またはエラー表示
 - **検索エラー**: 検索処理失敗時は適切なエラーメッセージを表示
 - **ページネーションエラー**: 無効なページアクセス時は有効なページにリダイレクト
+- **重複表示防止**: React Strict Modeでの重複実行に対応
 
 ## テスト戦略
 
@@ -634,3 +1101,149 @@ describe('Feature: image-management, Property 1: 有効画像アップロード�
 - **タグ数**: 0〜20個の範囲で生成
 - **ユーザー数**: 1〜1000ユーザーの範囲で生成
 - **画像数**: 1〜10000画像の範囲で生成
+
+## 今後の拡張機能
+
+### 一括タグ付け機能（管理画面）
+
+#### 機能概要
+選択した複数の画像に対して、一括でタグを追加する機能。
+
+#### 仕様
+- 画像一覧でチェックボックスで複数画像を選択後、「一括タグ付け」ボタンを押す
+- タグ入力ダイアログが表示され、追加するタグを入力（複数タグ対応）
+- 既存のTagInputコンポーネントを再利用（オートコンプリート付き）
+- 選択した全画像に対して指定タグを追加（既に付いているタグは重複しない）
+- 権限: System_Adminは全画像、Regular_Userは自分の画像のみ
+
+#### APIエンドポイント
+```typescript
+// 一括タグ追加
+'POST /api/admin/images/tags/bulk': {
+  body: { imageIds: string[]; tags: string[] };
+  response: {
+    success: number;    // 成功件数
+    failed: number;     // 失敗件数
+    failedImages: Array<{ imageId: string; reason: string }>;
+  };
+};
+```
+
+### レーティング機能（管理画面）
+
+#### 機能概要
+管理者が画像に対して1〜5段階の星評価を付与する機能。
+
+#### 仕様
+- **星評価**: 1〜5段階（星アイコンをクリックして設定）
+- **評価者**: ログイン済み管理ユーザーのみ（System_Admin, Image_Manager, Regular_User）
+- **1画像1ユーザー1評価**: 同じユーザーが再評価すると上書き
+- **平均評価**: 全ユーザーの評価の平均値を画像カードに表示（星アイコン + 数値）
+- **評価数**: 評価した人数を表示
+- **画像カード表示**: 平均レーティングと評価数を常時表示
+- **拡大表示（モーダル）**: 詳細情報に評価セクションを追加、自分の評価を変更可能
+- **検索フィルター**: レーティングでの絞り込みを追加（例: 4以上の画像のみ表示）
+
+#### データモデル
+```typescript
+// レーティングレコード（ImagesTableに保存）
+interface ImageRating {
+  PK: string;                    // "IMAGE#${imageId}"
+  SK: string;                    // "RATING#${userId}"
+  imageId: string;
+  userId: string;
+  rating: number;                // 1〜5
+  ratedAt: string;               // ISO 8601
+}
+
+// ImageMetadataに追加するフィールド
+interface ImageMetadataExtension {
+  averageRating?: number;        // 平均評価（1.0〜5.0、小数点1桁）
+  ratingCount?: number;          // 評価数
+}
+```
+
+#### APIエンドポイント
+```typescript
+// レーティング追加・更新（管理画面）
+'POST /api/admin/images/:id/rating': {
+  body: { rating: number };      // 1〜5
+  response: { averageRating: number; ratingCount: number; myRating: number };
+};
+
+// 自分のレーティング取得（管理画面）
+'GET /api/admin/images/:id/rating': {
+  response: { averageRating: number; ratingCount: number; myRating: number | null };
+};
+```
+
+#### レーティング絞り込み
+管理画面の画像一覧にレーティングフィルターを追加:
+- ドロップダウンまたはスライダーで最低レーティングを指定（例: 「3以上」「4以上」）
+- APIの`GET /api/admin/images`に`minRating`クエリパラメータを追加
+- DynamoDBでのフィルタリング: Scan/Queryの`FilterExpression`で`averageRating >= :minRating`
+
+### Like機能（ビューアー画面）
+
+#### 機能概要
+ビューアー画面で閲覧者が画像に「いいね」を付けられる機能。認証不要で、ブラウザのローカルストレージでLike状態を管理する。
+
+#### 仕様
+- **Likeボタン**: ハートアイコン（♡ / ♥）をクリックでトグル
+- **認証不要**: ログインなしでLike可能
+- **Like状態管理**: ブラウザのlocalStorageにLike済み画像IDを保存
+- **Like数表示**: 画像カードとモーダルにLike数を常時表示
+- **重複防止**: 同一ブラウザから同じ画像に2回Likeできない（トグルで解除は可能）
+
+#### データモデル
+```typescript
+// ImageMetadataに追加するフィールド
+interface ImageMetadataLikeExtension {
+  likeCount?: number;            // Like数（デフォルト0）
+}
+```
+
+#### APIエンドポイント
+```typescript
+// Like追加（ビューアー画面、認証不要）
+'POST /api/public/images/:id/like': {
+  response: { likeCount: number };
+};
+
+// Like解除（ビューアー画面、認証不要）
+'DELETE /api/public/images/:id/like': {
+  response: { likeCount: number };
+};
+```
+
+#### フロントエンド実装
+```typescript
+// localStorage でLike状態を管理
+const LIKED_IMAGES_KEY = 'likedImages';
+
+const getLikedImages = (): Set<string> => {
+  const stored = localStorage.getItem(LIKED_IMAGES_KEY);
+  return stored ? new Set(JSON.parse(stored)) : new Set();
+};
+
+const toggleLike = async (imageId: string) => {
+  const liked = getLikedImages();
+  if (liked.has(imageId)) {
+    liked.delete(imageId);
+    await unlikeImage(imageId);
+  } else {
+    liked.add(imageId);
+    await likeImage(imageId);
+  }
+  localStorage.setItem(LIKED_IMAGES_KEY, JSON.stringify([...liked]));
+};
+```
+
+#### DynamoDB更新
+Like/Unlike時に`ImageMetadata`の`likeCount`をアトミックにインクリメント/デクリメント:
+```typescript
+// UpdateExpression
+'SET likeCount = if_not_exists(likeCount, :zero) + :inc'
+// または
+'SET likeCount = likeCount - :dec'
+```
