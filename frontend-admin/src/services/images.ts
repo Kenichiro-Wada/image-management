@@ -2,13 +2,16 @@ import { apiClient } from './api';
 import type { ImageListResponse, ImageMetadata, UploadResponse } from '../types';
 
 // 画像一覧を取得
-export const getImages = async (page: number = 1, limit: number = 50, minRating?: number, hasLikes?: boolean): Promise<ImageListResponse> => {
+export const getImages = async (page: number = 1, limit: number = 50, minRating?: number, hasLikes?: boolean, visibility?: 'public' | 'private'): Promise<ImageListResponse> => {
   const params: Record<string, any> = { page, limit };
   if (minRating && minRating > 0) {
     params.minRating = minRating;
   }
   if (hasLikes) {
     params.hasLikes = 'true';
+  }
+  if (visibility) {
+    params.visibility = visibility;
   }
   const response = await apiClient.get<{ data: ImageListResponse }>('/api/admin/images', {
     params,

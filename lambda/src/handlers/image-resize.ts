@@ -74,13 +74,19 @@ export const handler = async (
 
         // 画像情報の取得
         const imageMetadata = await sharp(originalImage.Body).metadata();
-        const { width, height, format } = imageMetadata;
+        const { width: rawWidth, height: rawHeight, format, orientation } = imageMetadata;
+
+        // Exif orientationに基づいてwidth/heightを補正（90度/270度回転の場合は入れ替え）
+        const isRotated = orientation && (orientation >= 5 && orientation <= 8);
+        const width = isRotated ? rawHeight : rawWidth;
+        const height = isRotated ? rawWidth : rawHeight;
 
         logger.info('画像メタデータ取得完了', {
           imageId,
           width,
           height,
           format,
+          orientation,
         });
 
         // サムネイルキーを格納するオブジェクト
@@ -194,6 +200,7 @@ async function generateThumbnail(
   height: number
 ): Promise<Buffer> {
   return sharp(imageBuffer)
+    .rotate() // Exif orientationに基づいて自動回転
     .resize(width, height, {
       fit: 'cover', // アスペクト比を維持しながらトリミング
       position: 'center', // 中央を基準にトリミング

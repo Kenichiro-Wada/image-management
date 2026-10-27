@@ -19,6 +19,12 @@ A serverless image management system running on AWS. Administrators can upload a
 - **Like Filter**: Filter images by like status in admin panel, display like counts on image cards
 - **Slideshow**: Auto-play slideshow with pause/resume and manual navigation
 - **URL Tag Filtering**: Share gallery links filtered by specific tags
+- **Viewer Sort**: Sort public gallery by capture date, upload date, filename, or tag (asc/desc)
+- **Visibility Filter**: Filter images by public/private status in admin panel
+- **Responsive Modal**: Full-screen vertical layout on mobile (768px and below)
+- **Exif Orientation**: Auto-rotate thumbnails based on Exif orientation data
+- **S3 Presigned Upload**: Direct S3 upload via presigned URLs (bypasses API Gateway 10MB limit)
+- **Security**: axios version pinned to 1.13.5 (supply chain attack mitigation)
 
 ## Architecture
 
@@ -47,7 +53,7 @@ A serverless image management system running on AWS. Administrators can upload a
 ## Key Features
 
 ### Admin Panel
-- Multi-file and folder upload (JPEG only)
+- Multi-file and folder upload via S3 presigned URLs (JPEG only, bypasses API Gateway 10MB limit)
 - Tag management with autocomplete
 - 3-tier user permissions (System Admin / Image Manager / Regular User)
 - Single and bulk image download (ZIP with signed URLs, batch splitting for 50+ images)
@@ -55,6 +61,7 @@ A serverless image management system running on AWS. Administrators can upload a
 - Bulk tagging
 - 1-5 star rating with average display and filtering
 - Like filter (show only images with likes, like count badges)
+- Visibility filter (all / public only / private only)
 - Image detail modal with prev/next navigation (buttons + arrow keys)
 - Pagination with bulk delete
 - Logout functionality
@@ -63,10 +70,12 @@ A serverless image management system running on AWS. Administrators can upload a
 ### Viewer Gallery
 - Infinite scroll public gallery
 - Image zoom modal with navigation
+- Sort by capture date, upload date, filename, or tag (asc/desc)
 - Search by keywords, tags, and date range
 - Slideshow with auto-play, pause/resume
 - Like feature (anonymous, localStorage-based)
 - URL parameter tag filtering (`?tag=landscape&tag=summer`)
+- Responsive modal (full-screen vertical layout on mobile)
 
 
 ## Quick Start

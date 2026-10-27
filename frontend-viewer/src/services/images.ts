@@ -1,10 +1,12 @@
 import { apiClient } from './api';
-import type { ImageListResponse, SearchResponse, SearchFilters } from '../types';
+import type { ImageListResponse, SearchResponse, SearchFilters, SortField, SortDirection } from '../types';
 
 // 公開画像一覧を取得（無限スクロール用）
 export const getPublicImages = async (
   limit: number = 20,
-  cursor?: string
+  cursor?: string,
+  sortBy?: SortField,
+  sortDirection?: SortDirection
 ): Promise<ImageListResponse> => {
   const params: Record<string, string> = {
     limit: String(limit),
@@ -12,6 +14,12 @@ export const getPublicImages = async (
   
   if (cursor) {
     params.cursor = cursor;
+  }
+  if (sortBy) {
+    params.sortBy = sortBy;
+  }
+  if (sortDirection) {
+    params.sortDirection = sortDirection;
   }
 
   const response = await apiClient.get<{ data: ImageListResponse }>('/api/viewer/images', {

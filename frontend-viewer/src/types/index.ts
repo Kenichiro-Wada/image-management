@@ -53,3 +53,9 @@ export interface ErrorResponse {
     timestamp: string;
   };
 }
+
+// ソートフィールド
+export type SortField = 'capturedAt' | 'uploadedAt' | 'fileName' | 'tag';
+
+// ソート方向
+export type SortDirection = 'asc' | 'desc';

@@ -7,6 +7,10 @@ import { logger } from '../common/logger';
 const IMAGES_TABLE = process.env.IMAGES_TABLE || '';
 const DEFAULT_LIMIT = 20; // 1回の読み込み件数（無限スクロール用）
 
+// ソートパラメータの有効値
+const VALID_SORT_FIELDS = ['capturedAt', 'uploadedAt', 'fileName', 'tag'];
+const VALID_SORT_DIRECTIONS = ['asc', 'desc'];
+
 /**
  * 公開画像一覧取得ハンドラー（ビューアー用）
  * 
@@ -38,39 +42,55 @@ export const handler = withErrorHandler(async (
     throw new AppError('limitは1〜100の範囲で指定してください', 400);
   }
 
+  // ソートパラメータの取得（デフォルト: capturedAt, desc）
+  const sortBy = event.queryStringParameters?.sortBy || 'capturedAt';
+  const sortDirection = event.queryStringParameters?.sortDirection || 'desc';
+
+  // ソートパラメータのバリデーション
+  if (!VALID_SORT_FIELDS.includes(sortBy)) {
+    throw new AppError('無効なsortByパラメータです', 400);
+  }
+  if (!VALID_SORT_DIRECTIONS.includes(sortDirection)) {
+    throw new AppError('無効なsortDirectionパラメータです', 400);
+  }
+
   try {
-    // カーソルのデコード
-    let exclusiveStartKey: Record<string, any> | undefined;
-    if (cursorParam) {
-      try {
-        exclusiveStartKey = JSON.parse(Buffer.from(cursorParam, 'base64').toString('utf-8'));
-      } catch (error) {
-        throw new AppError('無効なカーソルです', 400);
-      }
-    }
+    // GSI2を使用して公開画像を全件取得
+    const allItems: any[] = [];
+    let lastKey: Record<string, any> | undefined;
 
-    // GSI2を使用して公開画像を取得
-    const result = await query({
-      tableName: IMAGES_TABLE,
-      indexName: 'GSI2',
-      keyConditionExpression: '#GSI2PK = :gsi2pk',
-      expressionAttributeNames: {
-        '#GSI2PK': 'GSI2PK',
-      },
-      expressionAttributeValues: {
-        ':gsi2pk': 'PUBLIC#true',
-      },
-      limit,
-      exclusiveStartKey,
-      scanIndexForward: false, // 降順（新しい順）
-    });
+    do {
+      const result = await query({
+        tableName: IMAGES_TABLE,
+        indexName: 'GSI2',
+        keyConditionExpression: '#GSI2PK = :gsi2pk',
+        expressionAttributeNames: {
+          '#GSI2PK': 'GSI2PK',
+        },
+        expressionAttributeValues: {
+          ':gsi2pk': 'PUBLIC#true',
+        },
+        exclusiveStartKey: lastKey,
+        scanIndexForward: false,
+      });
+      allItems.push(...(result.Items || []));
+      lastKey = result.LastEvaluatedKey;
+    } while (lastKey);
 
-    const items = (result.Items || []).map(formatImageItem);
+    // メモリ内ソート
+    sortImages(allItems, sortBy, sortDirection);
+
+    // オフセットベースカーソルページネーション
+    const offset = cursorParam ? parseInt(Buffer.from(cursorParam, 'base64').toString('utf-8'), 10) : 0;
+    const paged = allItems.slice(offset, offset + limit);
+    const hasMore = offset + limit < allItems.length;
+
+    const items = paged.map(formatImageItem);
 
     // 次のページのカーソルを生成
     let nextCursor: string | undefined;
-    if (result.LastEvaluatedKey) {
-      nextCursor = Buffer.from(JSON.stringify(result.LastEvaluatedKey)).toString('base64');
+    if (hasMore) {
+      nextCursor = Buffer.from(String(offset + limit)).toString('base64');
     }
 
     logger.info('公開画像一覧取得完了', {
@@ -91,6 +111,42 @@ export const handler = withErrorHandler(async (
     throw error;
   }
 });
+
+/**
+ * 画像をソートする
+ */
+function sortImages(items: any[], sortBy: string, sortDirection: string): void {
+  const dir = sortDirection === 'asc' ? 1 : -1;
+
+  items.sort((a, b) => {
+    let valA: any;
+    let valB: any;
+
+    switch (sortBy) {
+      case 'fileName':
+        valA = (a.fileName || '').toLowerCase();
+        valB = (b.fileName || '').toLowerCase();
+        break;
+      case 'uploadedAt':
+        valA = a.uploadedAt || '';
+        valB = b.uploadedAt || '';
+        break;
+      case 'tag':
+        valA = (a.tags && a.tags.length > 0) ? a.tags[0].toLowerCase() : '';
+        valB = (b.tags && b.tags.length > 0) ? b.tags[0].toLowerCase() : '';
+        break;
+      case 'capturedAt':
+      default:
+        valA = a.capturedAt || a.uploadedAt || '';
+        valB = b.capturedAt || b.uploadedAt || '';
+        break;
+    }
+
+    if (valA < valB) return -1 * dir;
+    if (valA > valB) return 1 * dir;
+    return 0;
+  });
+}
 
 /**
  * 画像アイテムのフォーマット

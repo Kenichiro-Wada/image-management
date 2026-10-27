@@ -128,9 +128,15 @@ export const ImageModal = ({ image: initialImage, onClose, onUpdate, images, cur
     }
   };
 
-  const formatDate = (dateString: string): string => {
-    const date = new Date(dateString);
-    return date.toLocaleString('ja-JP');
+  // 日本時間で保存されているため、Date変換せずそのまま整形して表示する
+  const formatDate = (dateString?: string): string => {
+    if (!dateString) return '不明';
+    // ISO 8601形式 "2024-01-15T10:30:00" → "2024/01/15 10:30:00"
+    const match = dateString.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/);
+    if (match) {
+      return `${match[1]}/${match[2]}/${match[3]} ${match[4]}:${match[5]}:${match[6]}`;
+    }
+    return dateString;
   };
 
   const formatFileSize = (bytes: number): string => {

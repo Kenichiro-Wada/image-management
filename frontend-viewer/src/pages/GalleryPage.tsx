@@ -3,9 +3,10 @@ import { useSearchParams } from 'react-router-dom';
 import { ImageGallery } from '../components/ImageGallery';
 import { ImageModal } from '../components/ImageModal';
 import { SearchFilter } from '../components/SearchFilter';
+import { SortControl } from '../components/SortControl';
 import { Slideshow } from '../components/Slideshow';
 import { searchImages } from '../services/images';
-import type { ImageMetadata, SearchFilters } from '../types';
+import type { ImageMetadata, SearchFilters, SortField, SortDirection } from '../types';
 
 export const GalleryPage = () => {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -15,6 +16,8 @@ export const GalleryPage = () => {
   const [isSearching, setIsSearching] = useState(false);
   const [isSlideshow, setIsSlideshow] = useState(false);
   const [displayImages, setDisplayImages] = useState<ImageMetadata[]>([]);
+  const [sortBy, setSortBy] = useState<SortField>('capturedAt');
+  const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
 
   // URLからタグパラメータを取得
   const initialTags = searchParams.getAll('tag');
@@ -112,6 +115,12 @@ export const GalleryPage = () => {
     setIsSlideshow(false);
   };
 
+  // ソート変更
+  const handleSortChange = (newSortBy: SortField, newSortDirection: SortDirection) => {
+    setSortBy(newSortBy);
+    setSortDirection(newSortDirection);
+  };
+
   return (
     <div className="gallery-page">
       {/* ヘッダー */}
@@ -130,6 +139,13 @@ export const GalleryPage = () => {
         initialTags={initialTags}
       />
 
+      {/* ソートコントロール */}
+      <SortControl
+        sortBy={sortBy}
+        sortDirection={sortDirection}
+        onSortChange={handleSortChange}
+      />
+
       {/* 画像ギャラリー */}
       <ImageGallery
         onImageClick={(image, index) => {
@@ -138,6 +154,8 @@ export const GalleryPage = () => {
         searchResults={searchResults}
         isSearching={isSearching}
         onImagesChange={handleImagesChange}
+        sortBy={sortBy}
+        sortDirection={sortDirection}
       />
 
       {/* 画像モーダル */}

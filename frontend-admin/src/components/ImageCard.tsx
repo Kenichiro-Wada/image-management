@@ -26,15 +26,14 @@ export const ImageCard = ({
     return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
   };
 
-  const formatDate = (dateString: string): string => {
-    const date = new Date(dateString);
-    return date.toLocaleDateString('ja-JP', {
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
+  // 日本時間で保存されているため、Date変換せずそのまま整形して表示する
+  const formatDate = (dateString?: string): string => {
+    if (!dateString) return '不明';
+    const match = dateString.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/);
+    if (match) {
+      return `${match[1]}/${match[2]}/${match[3]} ${match[4]}:${match[5]}`;
+    }
+    return dateString;
   };
 
   return (

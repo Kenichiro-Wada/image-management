@@ -3,22 +3,26 @@ import { getPublicImages } from '../services/images';
 import { CLOUDFRONT_CONFIG } from '../config/api';
 import { useInfiniteScroll } from '../hooks/useInfiniteScroll';
 import { LikeButton } from './LikeButton';
-import type { ImageMetadata } from '../types';
+import type { ImageMetadata, SortField, SortDirection } from '../types';
 
 interface ImageGalleryProps {
   onImageClick: (image: ImageMetadata, index: number) => void;
   searchResults?: ImageMetadata[];
   isSearching?: boolean;
   onImagesChange?: (images: ImageMetadata[]) => void;
+  sortBy?: SortField;
+  sortDirection?: SortDirection;
 }
 
-export const ImageGallery = ({ onImageClick, searchResults, isSearching, onImagesChange }: ImageGalleryProps) => {
+export const ImageGallery = ({ onImageClick, searchResults, isSearching, onImagesChange, sortBy, sortDirection }: ImageGalleryProps) => {
   const [images, setImages] = useState<ImageMetadata[]>([]);
   const [cursor, setCursor] = useState<string | undefined>();
   const [hasMore, setHasMore] = useState(true);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const initialLoadDone = useRef(false);
+  // ソートパラメータの前回値を保持するref
+  const prevSortRef = useRef({ sortBy, sortDirection });
 
   // 検索結果がある場合はそれを表示
   const displayImages = isSearching && searchResults ? searchResults : images;
@@ -30,6 +34,42 @@ export const ImageGallery = ({ onImageClick, searchResults, isSearching, onImage
       loadImages();
     }
   }, [isSearching]);
+
+  // ソートパラメータ変更時にリセットして再取得
+  useEffect(() => {
+    // 初回読み込み前はスキップ
+    if (!initialLoadDone.current) return;
+    // 前回と同じ値ならスキップ
+    if (prevSortRef.current.sortBy === sortBy && prevSortRef.current.sortDirection === sortDirection) return;
+
+    prevSortRef.current = { sortBy, sortDirection };
+
+    // 画像リストをクリアしカーソルをリセット
+    setImages([]);
+    setCursor(undefined);
+    setHasMore(true);
+    setIsLoading(true);
+    setError(null);
+
+    // 新しいソートパラメータで再取得
+    const reload = async () => {
+      try {
+        const response = await getPublicImages(20, undefined, sortBy, sortDirection);
+        setImages(response.images);
+        setCursor(response.pagination.cursor);
+        setHasMore(response.pagination.hasMore);
+        if (onImagesChange) {
+          onImagesChange(response.images);
+        }
+      } catch (err) {
+        console.error('画像の読み込みに失敗しました:', err);
+        setError('画像の読み込みに失敗しました');
+      } finally {
+        setIsLoading(false);
+      }
+    };
+    reload();
+  }, [sortBy, sortDirection]);
 
   // 画像を読み込む
   const loadImages = async () => {
@@ -43,7 +83,7 @@ export const ImageGallery = ({ onImageClick, searchResults, isSearching, onImage
     setError(null);
 
     try {
-      const response = await getPublicImages(20, cursor);
+      const response = await getPublicImages(20, cursor, sortBy, sortDirection);
       console.log('API Response:', response);
       console.log('Current images count:', images.length);
       console.log('New images count:', response.images.length);

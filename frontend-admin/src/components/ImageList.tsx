@@ -20,6 +20,7 @@ export const ImageList = () => {
   const [bulkTagLoading, setBulkTagLoading] = useState(false);
   const [minRatingFilter, setMinRatingFilter] = useState<number>(0);
   const [hasLikesFilter, setHasLikesFilter] = useState<boolean>(false);
+  const [visibilityFilter, setVisibilityFilter] = useState<'all' | 'public' | 'private'>('all');
   const [modalImageIndex, setModalImageIndex] = useState<number | null>(null);
 
   // モーダル表示状態管理
@@ -41,7 +42,7 @@ export const ImageList = () => {
     try {
       setLoading(true);
       setError('');
-      const response = await getImages(page, PAGINATION_CONFIG.itemsPerPage, minRatingFilter > 0 ? minRatingFilter : undefined, hasLikesFilter || undefined);
+      const response = await getImages(page, PAGINATION_CONFIG.itemsPerPage, minRatingFilter > 0 ? minRatingFilter : undefined, hasLikesFilter || undefined, visibilityFilter !== 'all' ? visibilityFilter : undefined);
       setImages(response.images);
       setCurrentPage(response.pagination.currentPage);
       setTotalPages(response.pagination.totalPages);
@@ -55,7 +56,7 @@ export const ImageList = () => {
 
   useEffect(() => {
     loadImages(currentPage);
-  }, [currentPage, minRatingFilter, hasLikesFilter]);
+  }, [currentPage, minRatingFilter, hasLikesFilter, visibilityFilter]);
 
   const handleSelectImage = (imageId: string) => {
     const newSelected = new Set(selectedImages);
@@ -111,7 +112,7 @@ export const ImageList = () => {
     }
 
     const allIds = Array.from(selectedImages);
-    const BATCH_SIZE = 50;
+    const BATCH_SIZE = 20;
 
     // 大量画像の場合は事前にアナウンス
     if (allIds.length >= 20) {
@@ -123,8 +124,8 @@ export const ImageList = () => {
       if (allIds.length <= BATCH_SIZE) {
         setDownloadProgress('ZIP生成中...');
         const downloadUrl = await bulkDownloadImages(allIds);
-        // S3署名付きURLを直接開く（Content-Disposition: attachment付き）
-        window.open(downloadUrl, '_blank');
+        // 署名付きURLに直接遷移してダウンロード
+        window.location.href = downloadUrl;
       } else {
         // 50枚超の場合はバッチ分割
         const batches: string[][] = [];
@@ -135,10 +136,16 @@ export const ImageList = () => {
         for (let i = 0; i < batches.length; i++) {
           setDownloadProgress(`ZIP生成中... (${i + 1}/${batches.length})`);
           const downloadUrl = await bulkDownloadImages(batches[i]);
-          window.open(downloadUrl, '_blank');
+          // iframeを使って複数ダウンロード（ページ遷移を防ぐ）
+          const iframe = document.createElement('iframe');
+          iframe.style.display = 'none';
+          iframe.src = downloadUrl;
+          document.body.appendChild(iframe);
           if (i < batches.length - 1) {
-            await new Promise(resolve => setTimeout(resolve, 2000));
+            await new Promise(resolve => setTimeout(resolve, 3000));
           }
+          // 少し待ってからiframeを削除
+          setTimeout(() => document.body.removeChild(iframe), 10000);
         }
       }
       setDownloadProgress('');
@@ -258,6 +265,17 @@ export const ImageList = () => {
               onChange={(e) => { setHasLikesFilter(e.target.checked); setCurrentPage(1); }}
             />
             Likeあり
+          </label>
+          <label>
+            公開状態:
+            <select
+              value={visibilityFilter}
+              onChange={(e) => { setVisibilityFilter(e.target.value as 'all' | 'public' | 'private'); setCurrentPage(1); }}
+            >
+              <option value="all">すべて</option>
+              <option value="public">公開のみ</option>
+              <option value="private">非公開のみ</option>
+            </select>
           </label>
         </div>
 

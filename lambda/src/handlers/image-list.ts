@@ -37,6 +37,7 @@ export const handler = withErrorHandler(async (
     ? parseFloat(event.queryStringParameters.minRating)
     : undefined;
   const hasLikes = event.queryStringParameters?.hasLikes === 'true';
+  const visibilityFilter = event.queryStringParameters?.visibility as 'public' | 'private' | undefined;
 
   // ページ番号のバリデーション
   if (page < 1) {
@@ -98,11 +99,11 @@ export const handler = withErrorHandler(async (
     let totalCount = 0;
 
     if (targetUserId) {
-      const result = await getUserImages(targetUserId, page, minRating, hasLikes);
+      const result = await getUserImages(targetUserId, page, minRating, hasLikes, visibilityFilter);
       items = result.items;
       totalCount = result.totalCount;
     } else {
-      const result = await getAllImages(page, minRating, hasLikes);
+      const result = await getAllImages(page, minRating, hasLikes, visibilityFilter);
       items = result.items;
       totalCount = result.totalCount;
     }
@@ -139,7 +140,7 @@ export const handler = withErrorHandler(async (
 /**
  * 特定ユーザーの画像を取得
  */
-async function getUserImages(userId: string, page: number, minRating?: number, hasLikes?: boolean): Promise<{
+async function getUserImages(userId: string, page: number, minRating?: number, hasLikes?: boolean, visibilityFilter?: 'public' | 'private'): Promise<{
   items: any[];
   totalCount: number;
 }> {
@@ -168,6 +169,13 @@ async function getUserImages(userId: string, page: number, minRating?: number, h
     allItems = allItems.filter(item => (item.likeCount || 0) >= 1);
   }
 
+  // 公開・非公開フィルター
+  if (visibilityFilter === 'public') {
+    allItems = allItems.filter(item => item.isPublic === true);
+  } else if (visibilityFilter === 'private') {
+    allItems = allItems.filter(item => item.isPublic !== true);
+  }
+
   const totalCount = allItems.length;
 
   // ページネーション
@@ -184,7 +192,7 @@ async function getUserImages(userId: string, page: number, minRating?: number, h
 /**
  * 全画像を取得
  */
-async function getAllImages(page: number, minRating?: number, hasLikes?: boolean): Promise<{
+async function getAllImages(page: number, minRating?: number, hasLikes?: boolean, visibilityFilter?: 'public' | 'private'): Promise<{
   items: any[];
   totalCount: number;
 }> {
@@ -202,6 +210,13 @@ async function getAllImages(page: number, minRating?: number, hasLikes?: boolean
   // hasLikesフィルター
   if (hasLikes) {
     allItems = allItems.filter(item => (item.likeCount || 0) >= 1);
+  }
+
+  // 公開・非公開フィルター
+  if (visibilityFilter === 'public') {
+    allItems = allItems.filter(item => item.isPublic === true);
+  } else if (visibilityFilter === 'private') {
+    allItems = allItems.filter(item => item.isPublic !== true);
   }
 
   const totalCount = allItems.length;
@@ -228,8 +243,10 @@ async function getAllImages(page: number, minRating?: number, hasLikes?: boolean
  * 画像アイテムのフォーマット
  */
 function formatImageItem(item: any): any {
+  // imageIdが欠落している場合はPKから抽出
+  const imageId = item.imageId || (item.PK ? item.PK.replace('IMAGE#', '') : '');
   return {
-    imageId: item.imageId,
+    imageId,
     fileName: item.fileName,
     fileSize: item.fileSize,
     mimeType: item.mimeType,
